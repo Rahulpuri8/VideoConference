@@ -1,0 +1,24 @@
+speaker-highlighter/
+├── main.py                 # Main processing script
+├── utils.py                # Helper functions
+├── requirements.txt        # Dependencies
+├── input_videos/           # User-provided videos
+├── output_videos/          # Processed results
+└── temp_audio/             # Extracted audio files
+
+
+
+
+Prompt: 
+I want a project where it take video file input, and highlight that speaker who is speaking in that frame. and it should be for every speaker whoever speaks should be highlighed. highlight here means his frame should be zoom in and hide other speaker only shows that speaker.
+
+now give me ideas how can I complete this project who give me best results. tell me open sources alternatives. suggestions to do this project. 
+
+prepare a file structure, libraries to install, CPU based approach, and complete code using open source alternatives
+
+ALso, fetch github repo or huggingface spaces that is same use case as of mine. 
+
+
+
+
+

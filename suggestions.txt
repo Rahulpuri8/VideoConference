@@ -1,0 +1,533 @@
+We are going to build a system that:
+
+1. Takes a video file as input.
+
+2. Detects faces in each frame and identifies the speaker (i.e., the face that is speaking) at that moment.
+
+3. For each frame, if a speaker is detected, it zooms in on that speaker's face and hides other speakers (or non-speakers). If there are multiple speakers, we might need to decide on one (e.g., the loudest or the one speaking the longest?).
+
+4. Outputs a new video with the effect.
+
+Steps:
+
+1. **Video Input**: Use OpenCV to read the video file.
+
+2. **Face Detection and Tracking**: Use a face detection model (like MTCNN, Haar cascades, or Dlib) to detect faces in each frame. Since the same person appears in consecutive frames, we need to track them to maintain identity. We can use a tracker (like KCF, CSRT) or face recognition (like FaceNet) for re-identification across frames. However, note that face recognition requires a database of faces, which we don't have. So we can do:
+
+- Detect faces in the first few frames and assign unique IDs to each face using a tracker that will follow them in subsequent frames.
+
+- When a face leaves the frame and comes back, we might need to re-identify. A simpler approach is to use a face recognition model that can compute embeddings and then cluster by identity. But that might be heavy. Alternatively, we can use a real-time tracker that handles occlusion.
+
+3. **Speech Detection**: We need to determine who is speaking in each frame. We can use:
+
+- **Audio-based approach**: We can extract the audio from the video and use voice activity detection (VAD) to determine when someone is speaking. But then we have to synchronize the audio with the video frames. Also, we need to know which face corresponds to which audio source. This is difficult because we usually have a single audio channel. However, there are techniques for audio-visual speech synchronization (like active speaker detection) that use both audio and visual cues.
+
+- **Visual-based approach (lip movement)**: We can train or use a pre-trained model that detects lip movement to see if a person is speaking. This is more direct and doesn't require audio. However, it might be less robust.
+
+Given the complexity, a better approach is to use **active speaker detection** which uses both audio and visual cues. There are pre-trained models for this, like the one from [AVA Active Speaker](https://github.com/okankop/AVA-ActiveSpeaker) or [TalkNet](https://github.com/TaoRuijie/TalkNet-ASD).
+
+4. **Active Speaker Detection**:
+
+- We can use a model that takes both the audio (as a spectrogram) and the video frames (cropped to the face) and predicts if the person is speaking. We do this for every face in every frame.
+
+5. **Processing**:
+
+- For each frame, we have multiple faces (with IDs) and we know which one is speaking (if any) by the active speaker detection model.
+
+- Then, we want to zoom in on the speaking face and remove the others. We can do:
+
+a. If one speaker is active, crop the frame to that face and then resize to the original frame size (so it's zoomed in). We might need to adjust the cropping to include some context (like shoulders) if desired.
+
+b. If multiple speakers are active, we might choose the one with the highest speaking confidence or the one that has been speaking for the longest. Alternatively, we could show the main speaker and then a smaller inset of the other? But the requirement is to show only the speaker. So we choose one.
+
+6. **Output**: Write the processed frames to a new video file.
+
+Open Source Tools:
+
+- **Video Processing**: OpenCV (cv2) for reading, writing, and resizing.
+
+- **Face Detection**:
+
+- MTCNN: Accurate but slow.
+
+- Dlib's HOG + SVM: Faster but less accurate.
+
+- MediaPipe: Fast and reasonably accurate, and provides face landmarks. (Recommended: MediaPipe for real-time performance)
+
+- **Face Tracking**: We can use the bounding box from the previous frame and update with a tracker (OpenCV has trackers: BOOSTING, MIL, KCF, TLD, MEDIANFLOW, GOTURN, MOSSE, CSRT). Alternatively, we can run face detection every N frames and use a face matching (using embeddings) in between. But for speed, a tracker is better.
+
+- **Active Speaker Detection**:
+
+- [TalkNet](https://github.com/TaoRuijie/TalkNet-ASD): A state-of-the-art active speaker detection model. It uses face crops and audio to determine if the person is speaking. It is implemented in PyTorch.
+
+- [AVA Active Speaker Detection](https://github.com/okankop/AVA-ActiveSpeaker): Another model for active speaker detection.
+
+We'll use TalkNet because it's more recent and has good performance.
+
+Steps in Detail:
+
+1. **Extract Audio**: We need to extract the audio from the video and convert it to a waveform that can be used by the active speaker model. We can use `pydub` or `ffmpeg` for this.
+
+2. **Video Processing Loop**:
+
+- Use OpenCV to read the video frame by frame.
+
+- For each frame, detect faces (or track from previous frames) to get bounding boxes and face IDs.
+
+- For each face, crop the face and use it along with the corresponding audio segment (a window around the current frame) to run the active speaker detection.
+
+3. **Active Speaker Detection**:
+
+- The model expects:
+
+- A sequence of face crops (for a few seconds) for visual input.
+
+- The corresponding audio segment (for the same duration) for audio input.
+
+- We need to buffer the frames and audio for a short duration (e.g., 1 second) to make a prediction for the current frame? Note: TalkNet uses 5 face crops (at 3fps) and 0.2 seconds of audio. We have to adjust.
+
+Actually, the TalkNet model operates on a temporal window. We might need to process the video in chunks? But we want per-frame output.
+
+Alternatively, we can run the active speaker detection on a per-frame basis by using a sliding window. We can precompute the active speaker for each face in each frame by processing the entire video in one go? But that would require storing intermediate results.
+
+Due to the complexity, we might consider the following:
+
+- Precompute face tracks (bounding boxes for each face for the entire video) and then run active speaker detection on the entire video at once. This is more efficient because we can process the entire audio and video together.
+
+Steps for offline processing:
+
+a. **Extract audio** and save as a WAV file.
+
+b. **Extract face tracks**: Run face detection and tracking on the entire video to get a list of face bounding boxes per frame, along with a unique ID for each face across frames.
+
+c. **Active Speaker Detection**:
+
+- For each face track, extract the face crops (for the entire video) and the corresponding audio.
+
+- Use TalkNet to predict, for each frame, whether the face is speaking.
+
+d. **Generate Output Video**: For each frame, if there is at least one active speaker, choose the one with the highest speaking score. Then, crop the frame to that speaker's bounding box (with some padding) and resize to the original resolution. If there are multiple, we choose one (maybe the one with the highest confidence). If none, we might show the entire frame? Or the last speaker? Or a default? We have to decide.
+
+4. **Implementation Challenges**:
+
+- **Performance**: Active speaker detection and face detection are computationally heavy. We might need to run on GPU for reasonable speed.
+
+- **Synchronization**: We must ensure that the audio and video are aligned in time.
+
+Proposed Pipeline:
+
+1. **Preprocessing**:
+
+- Extract audio from video: `ffmpeg -i input_video.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 audio.wav`
+
+- Read the video with OpenCV to get frames and fps.
+
+2. **Face Detection and Tracking**:
+
+- Use MediaPipe for face detection and assign IDs. Since MediaPipe doesn't provide tracking, we can use a tracker (like CSRT) for each detected face. But note: faces may enter and leave.
+
+- Alternatively, we can use a face tracking algorithm that works across frames. We can use `dlib` correlation tracker or OpenCV trackers. However, for long videos, trackers drift. So we can do:
+
+- Detect faces every N frames and then use IOU (Intersection Over Union) to associate with existing tracks. If a face is not detected for a few frames, we keep the tracker running until it fails.
+
+We can create a class `FaceTracker` that holds a list of current tracks. For each track, we store:
+
+- `track_id`
+
+- `bbox`: current bounding box
+
+- `tracker` object (from OpenCV)
+
+- a flag if the tracker is being updated
+
+Steps for each frame:
+
+- Update each tracker and get the new bbox.
+
+- If the update fails (or the bbox is out of bounds), mark the track as lost.
+
+- Every N frames (or when the number of tracks is 0), run face detection and then:
+
+- For each detected face, check if it overlaps with an existing track. If not, create a new track.
+
+We can use a simple Hungarian algorithm for matching by IOU.
+
+3. **Active Speaker Detection**:
+
+- We will use TalkNet. The model from the repository expects:
+
+- Visual stream: 5 consecutive face crops (we can sample at 3 fps, so we need to adjust our frame rate for the visual part). But note: the video might be 30fps. We have to sample frames at 3fps for the visual input? And the audio is at 16000 Hz, and they use 0.2 seconds of audio (3200 samples) for each prediction.
+
+Actually, the TalkNet model is designed for 25fps videos and uses a temporal context of 5 frames (so 0.2 seconds). But we can adapt.
+
+The TalkNet model outputs a score for each face in each frame (after processing the window). We need to run it for every face in every frame? But note: the model uses a sliding window and we can process the entire video for one face track at a time.
+
+The TalkNet repository provides a demo that processes a video and outputs a prediction for each face in each frame. We can use that.
+
+Steps for TalkNet:
+
+- Precompute face crops for each face track. For each face, we have a sequence of face images (aligned and cropped) for the entire video. We also have the audio.
+
+- Then, for each face, we run the model to get a speaking score for each frame.
+
+We can do this for all faces and then for each frame, we have a set of faces with a speaking score.
+
+4. **Decision and Video Processing**:
+
+- For each frame, we have a list of faces (with bbox and track_id) and their speaking score (if the model has been run for that frame). We choose the face with the highest score if it is above a threshold (say 0.5). Then, we crop the original frame to that face's bbox (with some padding to make it look nice) and then resize the cropped region to the original frame size (so it appears zoomed in). We then write that frame to the output video.
+
+- If no face is above the threshold, we might show the entire frame? Or we could show the previous speaker for a short time? But the requirement is to show only the speaker. So if no one is speaking, we might show the entire frame? Or a fixed shot? We have to decide.
+
+- Alternatively, we might use a transition effect? But for simplicity, we can show the entire frame when no one is speaking.
+
+5. **Output Video**:
+
+- Write the processed frames to a video file using OpenCV.
+
+Implementation Plan:
+
+1. Set up environment with required packages: OpenCV, PyTorch (for TalkNet), MediaPipe, and others.
+
+2. Write a script to extract audio from video.
+
+3. Implement face detection and tracking:
+
+- Use MediaPipe for face detection every N frames (or when tracks are lost). Use OpenCV trackers for the rest.
+
+- Maintain a list of Face objects with track_id, tracker, and current bbox.
+
+4. Extract face crops for each track. We need to store the entire sequence of face crops for each track? But note: the TalkNet model requires the entire track to run? Actually, yes. So we have to store the face crops for each track for the entire video. That might be memory intensive. Alternatively, we can process the video in chunks.
+
+We can do:
+
+- First, run face detection and tracking on the entire video and save the face crops for each track as separate image sequences (or store in memory if the video is not too long).
+
+- Then, run the TalkNet model for each track on the entire video to get the speaking scores for each frame.
+
+5. Run TalkNet for each face track (with the audio) to get the per-frame speaking scores.
+
+6. Then, for each frame in the video:
+
+- Check which face (if any) has the highest speaking score above the threshold.
+
+- Crop and zoom to that face.
+
+7. Write the frame to the output video.
+
+Alternative to step 4,5,6: We can process the video in chunks (e.g., 1-minute chunks) to avoid storing the entire video in memory.
+
+However, note: the TalkNet model requires the entire track? Actually, no. The model uses a temporal window (5 frames at 3fps). So we can run the model in a sliding window fashion. But we have to do it for each face track independently? The TalkNet codebase does provide per-frame prediction.
+
+We can follow the demo in the TalkNet repository: `demo.py`. It processes the entire video and outputs a prediction for each face in each frame.
+
+Steps from TalkNet:
+
+- They first use a face detector (RetinaFace) to get face bounding boxes for every frame.
+
+- Then, they run the active speaker detection model using the face crops and the audio.
+
+We can adapt:
+
+- Instead of RetinaFace, we use our own face tracks (to maintain identity). We can use the face crops from our tracks.
+
+- Then, we run the TalkNet model for the entire video to get the scores per face per frame.
+
+The TalkNet model can handle multiple faces? Actually, they process one face at a time? No, they process each face independently. So we can run the model for each track.
+
+But note: the model uses the audio for the entire video? Yes, but the audio is the same for all faces. So we can preload the audio.
+
+Steps:
+
+for each face track:
+
+extract the face crops (for the entire video) for that track -> a list of images (one per frame) for the entire video.
+
+then run the TalkNet model for that track (with the entire audio) to get a list of scores (one per frame).
+
+Then, we have for each frame, for each face track present in that frame, a score.
+
+Then, for frame t, we look at the scores for all faces in that frame and pick the highest.
+
+8. **Cropping and Zooming**:
+
+- Once we have the selected face for the frame, we take the bounding box (from our tracker) for that face and expand it by a certain percentage (say 20%) to include some context. Then, we crop that region from the original frame and resize it to the original video dimensions.
+
+- If no face is selected, we output the entire frame.
+
+9. **Write the Output Video**:
+
+- Use OpenCV to write the frames.
+
+Potential Issues:
+
+- **Performance**: Processing a long video might be slow, especially face detection and active speaker detection. We might need to run on a GPU and optimize.
+
+- **Memory**: Storing face crops for the entire video for multiple tracks might be heavy. We can process the video in chunks.
+
+- **Face Tracking Accuracy**: If the tracker fails, the face might be lost. We can rely more on face detection at the cost of speed.
+
+- **Audio-Visual Sync**: It's critical that the audio and video are aligned. We must ensure that the frame rate and audio sample rate are correctly handled.
+
+Open Source Alternatives for Each Step:
+
+1. **Face Detection**:
+
+- MediaPipe: https://google.github.io/mediapipe/solutions/face_detection.html
+
+- Dlib: http://dlib.net/
+
+- MTCNN: https://github.com/ipazc/mtcnn
+
+2. **Face Tracking**:
+
+- OpenCV tracking algorithms: https://docs.opencv.org/3.4/d9/df8/group__tracking.html
+
+3. **Active Speaker Detection**:
+
+- TalkNet: https://github.com/TaoRuijie/TalkNet-ASD
+
+- AVA Active Speaker: https://github.com/okankop/AVA-ActiveSpeaker
+
+4. **Video and Audio Processing**:
+
+- OpenCV: for video
+
+- FFmpeg: for audio extraction
+
+- PyDub: for audio processing (if needed)
+
+Implementation Outline:
+
+We will break the project into several scripts:
+
+1. `extract_audio.py`: Extracts audio from the video.
+
+2. `detect_faces.py`: Processes the video to detect and track faces, outputs face tracks (as a pickle file: for each frame, list of (track_id, bbox)).
+
+3. `active_speaker_detection.py`: For each face track, extract face crops and then run TalkNet to get speaking scores for each frame. Outputs a dictionary: {frame_id: {track_id: score}}.
+
+4. `generate_output_video.py`: For each frame, choose the active face (if any), crop and zoom, then write the frame.
+
+But note: step 3 requires storing face crops for the entire video? That might be too heavy. Alternatively, we can run step 2 and step 3 together in chunks? Or we can store the face crops on disk? We can store the face crops as image files? But that would be too many.
+
+Alternatively, we can run the active speaker detection in the same loop as face tracking? But then we would have to run the TalkNet model in real-time? That might be slow.
+
+Given the complexity, we might run the entire pipeline in a single pass if the video is short. For long videos, we break into chunks.
+
+Another idea: We can precompute the face tracks and then in the active speaker detection, we load the video and for each face track, we extract the face crops on the fly (by seeking the video) and then run the model. That way we don't store all crops at once.
+
+Steps for active speaker detection without storing all crops:
+
+- Precompute face tracks (with frame numbers and bbox) and store as a list for each track.
+
+- Then, for each track, we:
+
+- Open the video and seek to the starting frame of the track.
+
+- For each frame in the track, read the frame, crop the face (using the stored bbox), and save the crop (or keep in memory for the model).
+
+- Also, we have the entire audio already loaded.
+
+- Then, run the TalkNet model for that track to get scores for each frame in the track.
+
+- Then, we aggregate the scores by frame.
+
+This avoids storing all face crops at once, but we read the video multiple times (once per track). For a video with 10 faces and 10 minutes, that might be acceptable? But note: the video reading is expensive.
+
+Alternatively, we can read the entire video once and store the frames? Not feasible for long videos.
+
+We can do:
+
+- Precompute the face tracks and store the bboxes per frame.
+
+- Then, we read the video once, and for each frame, we crop the faces (for all tracks present in that frame) and store the crops in a data structure per track (in memory or on disk). Then, after reading the entire video, we have the face crops for each track. Then run TalkNet for each track.
+
+But then we are storing all face crops for the entire video. That might be too heavy for memory.
+
+We can store the face crops on disk as a separate image files? Then we don't use memory. But I/O might be slow.
+
+Alternatively, we can use a compromise: process the video in chunks (e.g., 1000 frames at a time) and run TalkNet for the tracks that appear in that chunk? But a track might span multiple chunks.
+
+Given the complexity, for the first version, we assume the video is short (a few minutes) and we store the face crops in memory.
+
+Conclusion:
+
+We will implement the pipeline for short videos. For long videos, we might need to optimize later.
+
+Steps:
+
+1. **Extract Audio**:
+
+```python
+
+import ffmpeg
+
+input_video = 'input.mp4'
+
+audio_output = 'audio.wav'
+
+stream = ffmpeg.input(input_video)
+
+stream = ffmpeg.output(stream.audio, audio_output, ac=1, ar=16000)
+
+ffmpeg.run(stream)
+
+```
+
+2. **Face Detection and Tracking**:
+
+We'll use MediaPipe for face detection and OpenCV for tracking.
+
+Pseudocode:
+
+```python
+
+import cv2
+
+import mediapipe as mp
+
+mp_face_detection = mp.solutions.face_detection
+
+face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+
+# Open video
+
+cap = cv2.VideoCapture(input_video)
+
+fps = cap.get(cv2.CAP_PROP_FPS)
+
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+# We'll store face tracks: {track_id: [(frame_num, bbox)]}
+
+# And for current tracks, we maintain a list of Track objects.
+
+class Track:
+
+def __init__(self, track_id, bbox):
+
+self.track_id = track_id
+
+self.bbox = bbox  # [x, y, w, h]
+
+self.tracker = cv2.TrackerCSRT_create()
+
+# initialize tracker with first frame and bbox
+
+# ...
+
+tracks = []  # list of active tracks
+
+next_id = 0
+
+# We'll run detection every N frames or when there are no tracks
+
+DETECT_INTERVAL = 5  # every 5 frames
+
+for frame_num in range(total_frames):
+
+ret, frame = cap.read()
+
+if not ret: break
+
+# Update existing tracks with trackers
+
+for track in tracks:
+
+success, bbox = track.tracker.update(frame)
+
+if success:
+
+track.bbox = bbox
+
+else:
+
+# mark for removal
+
+track.valid = False
+
+# Remove invalid tracks
+
+tracks = [t for t in tracks if t.valid]
+
+# Run face detection every DETECT_INTERVAL or if no tracks
+
+if frame_num % DETECT_INTERVAL == 0 or len(tracks)==0:
+
+# Convert the frame to RGB for MediaPipe
+
+frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+results = face_detection.process(frame_rgb)
+
+detections = []
+
+if results.detections:
+
+for detection in results.detections:
+
+# Get bounding box
+
+box = detection.location_data.relative_bounding_box
+
+ih, iw, _ = frame.shape
+
+x = int(box.xmin * iw)
+
+y = int(box.ymin * ih)
+
+w = int(box.width * iw)
+
+h = int(box.height * ih)
+
+detections.append([x, y, w, h])
+
+# Match detections with existing tracks using IOU
+
+# ... (using Hungarian algorithm or simple IOU matching)
+
+# For unmatched detections, create new tracks
+
+# ...
+
+# Store the bbox for each track in this frame for later use
+
+```
+
+This is a simplified version. We have to implement the matching.
+
+3. **Active Speaker Detection with TalkNet**:
+
+We follow the instructions from the TalkNet repository to set up the model.
+
+For each track, we have a list of face crops (for every frame the track is present). We extract these crops from the video.
+
+Then, we run the TalkNet model for that track with the audio. The model will output a score for each frame (only for frames where the track is present).
+
+We then aggregate: for each frame, we have a dictionary of track_id to score.
+
+4. **Generate Output Video**:
+
+For each frame:
+
+- If there is at least one track with a score above threshold, pick the track_id with the highest score.
+
+- Get the bounding box for that track in this frame.
+
+- Crop the frame: expand the bbox by 20% (but not beyond the frame boundaries) and then crop.
+
+- Resize the cropped region to the original video size.
+
+- Write the frame.
+
+If no track has a score above threshold, then we write the entire frame.
+ 
+5. **Output the video**.
+
+This is a high-level plan. The implementation will be complex and might require adjustments.
+
+We can start with a small video to test.
+
+Note: The TalkNet model requires specific dependencies (PyTorch, etc.), so we have to set up a separate environment.
+
+Let me know if you need more details on any part.
