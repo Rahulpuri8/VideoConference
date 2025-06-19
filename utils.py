@@ -2,21 +2,21 @@ import os
 import cv2
 import numpy as np
 import subprocess
-from config import AUDIO_SAMPLE_RATE, VAD_FRAME_MS, VIDEO_FPS
+from config import AUDIO_SAMPLE_RATE, VAD_FRAME_MS, VIDEO_FPS, CODEC_PRIORITY
 
 def extract_audio(video_path, output_path="temp_audio/audio.wav"):
     """Robust audio extraction with proper format for VAD"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     cmd = [
-        'ffmpeg', '-y',
+        'ffmpeg', '-y', '-loglevel', 'error',
         '-i', video_path,
         '-ac', '1',
         '-ar', str(AUDIO_SAMPLE_RATE),
         '-acodec', 'pcm_s16le',
         output_path
     ]
-    subprocess.run(cmd, check=True, stderr=subprocess.DEVNULL)
+    subprocess.run(cmd, check=True)
     return output_path
 
 def prepare_audio_frames(audio, sample_rate):
@@ -37,6 +37,16 @@ def calculate_frames_per_audio_frame(video_fps, audio_frame_ms):
     audio_frame_duration = audio_frame_ms / 1000
     return max(1, int(video_fps * audio_frame_duration))
 
+def create_video_writer(output_path, fps, width, height):
+    """Try multiple codecs until finding a working one"""
+    for codec in CODEC_PRIORITY:
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height), isColor=True)
+        if out.isOpened():
+            print(f"Using codec: {codec}")
+            return out
+    raise RuntimeError(f"Failed to initialize VideoWriter with codecs: {CODEC_PRIORITY}")
+
 def zoom_face(frame, face_box, zoom=1.8):
     """Smooth zoom effect with boundary checks"""
     x, y, w, h = face_box
@@ -52,4 +62,18 @@ def zoom_face(frame, face_box, zoom=1.8):
     return cv2.resize(cropped, (frame.shape[1], frame.shape[0]), 
                      interpolation=cv2.INTER_LINEAR)
 
-
+def verify_video_file(path):
+    """Check if video file is valid and playable"""
+    if not os.path.exists(path):
+        return False
+    if os.path.getsize(path) < 1024:
+        return False
+    
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        cap.release()
+        return False
+    
+    ret, _ = cap.read()
+    cap.release()
+    return ret
